@@ -1,0 +1,1 @@
+Inbound From ECC to S4 / Inbound From Impulse to S4 BP create Create Odata service to create and change the business partners custom Bapi is created and is handling 7 views of customer master  and it is called in custom odata service.
