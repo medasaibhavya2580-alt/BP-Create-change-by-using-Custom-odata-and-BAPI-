@@ -1,0 +1,1672 @@
+Odata : create 2 deep entity set sales where partner details are maintained & for general credit & contractaccount & companycode & sales are maintained
+
+Purpose              : Inbound From ECC to S4 / Inbound From Impulse to S4 BP create
+
+*                        Create Odata service to create and change the business partners
+
+*                        custom Bapi is created and is handling 7 views of customer master
+
+*                        and it is called in custom odata service.
+
+
+  METHOD /iwbep/if_mgw_appl_srv_runtime~create_deep_entity.
+
+    DATA: lwa_deep_entity       TYPE zcl_zi_gbl_ar_customer_mpc_ext=>t_deep_entity,
+
+          li_deep_entity        TYPE STANDARD TABLE OF zcl_zi_gbl_ar_customer_mpc_ext=>t_deep_entity,
+
+          lwa_deep_entity_sales TYPE zcl_zi_gbl_ar_customer_mpc_ext=>t_sales.
+
+**Structures
+
+    DATA: li_bp_create   TYPE STANDARD TABLE OF zotc_brim_bupa_create,
+
+          lwa_bp_create  TYPE zotc_brim_bupa_create,
+
+          lwa_ca_create  TYPE zotc_brim_ctracct_create,
+
+          lwa_cms_create TYPE zotc_brim_cms_create,
+
+          li_sales       TYPE STANDARD TABLE OF zotc_brim_sd_create,
+
+          lwa_sales      TYPE zotc_brim_sd_create,
+
+          lwa_cc_create  TYPE zotc_brim_cc_create,
+
+          lwa_cp_create  TYPE zotc_brim_cont_create.
+
+    DATA: lv_country_code TYPE land1,
+
+          lv_market_place TYPE char6,
+
+          lv_partner      TYPE bu_partner,
+
+          li_partner      TYPE STANDARD TABLE OF zotc_brim_partners_create,
+
+          lwa_partner     TYPE zotc_brim_partners_create,
+
+          li_contact      TYPE STANDARD TABLE OF zotc_brim_cont_create,
+
+          lwa_contact     TYPE zotc_brim_cont_create,
+
+          li_return       TYPE STANDARD TABLE OF zotc_brim_return,
+
+          li_return2      TYPE bapiret2_t,
+
+          lwa_return2     LIKE LINE OF li_return2,
+
+          lv_errmsg       TYPE bapi_msg,
+
+          lo_msg          TYPE REF TO /iwbep/if_message_container.
+
+    CONSTANTS : lc_e TYPE string VALUE 'E',
+
+                lc_s TYPE c VALUE 'S'.
+
+    FIELD-SYMBOLS: <fs_sales> TYPE zcl_zi_gbl_ar_customer_mpc_ext=>t_sales.
+
+    " Read data from payload
+
+    TRY.
+
+        io_data_provider->read_entry_data(
+
+          IMPORTING
+
+            es_data = lwa_deep_entity ).
+
+      CATCH /iwbep/cx_mgw_tech_exception INTO DATA(lx_tech).
+
+        lo_msg = me->mo_context->get_message_container( ).
+
+        lo_msg->add_message_from_exception(
+
+          io_exception              = lx_tech
+
+          iv_message_target         =  lc_e
+
+          iv_add_to_response_header = abap_true ).
+
+        RAISE EXCEPTION TYPE /iwbep/cx_mgw_busi_exception
+
+          EXPORTING
+
+            message_container = lo_msg.
+
+    ENDTRY.
+
+    IF lwa_deep_entity IS NOT INITIAL.
+
+*mapping for FM inputs
+
+      lwa_bp_create = CORRESPONDING #( lwa_deep_entity ).
+
+      lwa_ca_create  = CORRESPONDING #( lwa_deep_entity-to_contractaccount ). "OPTIONAL ).
+
+      lwa_cms_create = CORRESPONDING #( lwa_deep_entity-to_credit ).
+
+      lwa_cc_create  = CORRESPONDING #( lwa_deep_entity-to_companycode ).
+
+      lwa_sales      = CORRESPONDING #( lwa_deep_entity-to_sales ).
+
+      APPEND LINES OF lwa_deep_entity-to_sales-to_partner TO li_partner.
+
+      li_contact = VALUE #( BASE li_contact ( LINES OF lwa_deep_entity-to_contact ) ).
+
+      lv_market_place = lwa_deep_entity-oa_mktplace_id.
+
+**Begin of insert of logic of country code for impulse INMEHS04
+
+      IF lwa_deep_entity-country IS INITIAL.
+
+        SELECT SINGLE partner,
+
+               bpext
+
+               FROM but000
+
+               INTO @DATA(lwa_ext_no)
+
+               WHERE bpext = @lwa_bp_create-bcn_num.
+
+        IF sy-subrc IS INITIAL AND lwa_ext_no IS NOT INITIAL.
+
+          SELECT SINGLE partner,
+
+                 addrnumber
+
+                 FROM but020
+
+                 INTO @DATA(lwa_adr_no)
+
+                 WHERE partner = @lwa_ext_no-partner.
+
+            IF sy-subrc IS INITIAL AND lwa_adr_no IS NOT INITIAL.
+
+              SELECT SINGLE addrnumber,
+
+                     country
+
+                     FROM adrc
+
+                     INTO @DATA(lwa_countrycode_t)
+
+                     WHERE addrnumber = @lwa_adr_no-addrnumber.
+
+              IF sy-subrc IS INITIAL AND lwa_countrycode_t IS NOT INITIAL.
+
+                lv_country_code = lwa_countrycode_t-country.
+
+                lwa_bp_create-country = lv_country_code.
+
+              ENDIF.
+
+            ENDIF.
+
+          ENDIF.
+
+        ELSE.
+
+          lv_country_code = lwa_deep_entity-country.
+
+        ENDIF.
+
+*End of Insert by INMEHS04.
+
+        "Call Customer master FM for create and change scenario of business partners
+
+        CALL FUNCTION 'ZOTC_CUST_BP_CREATE'
+
+          EXPORTING
+
+            im_bp_create       = lwa_bp_create
+
+            im_ca_create       = lwa_ca_create
+
+            im_cms_create      = lwa_cms_create
+
+            im_sales_create    = lwa_sales
+
+            im_ccode_create    = lwa_cc_create
+
+            im_country_code    = lv_country_code
+
+            im_market_place    = lv_market_place
+
+          TABLES
+
+            tb_partners_create = li_partner
+
+            tb_contact_create  = li_contact
+
+            tb_return_log      = li_return.
+
+        IF li_return IS NOT INITIAL.
+
+          READ TABLE li_return TRANSPORTING NO FIELDS WITH KEY ex_bu_partner = ''.
+
+          IF sy-subrc IS INITIAL.
+
+*        Error handling
+
+            LOOP AT li_return INTO DATA(lwa_return).
+
+              lwa_return2 = VALUE #( BASE lwa_return
+
+              type       = lwa_return-type
+
+              number     = lwa_return-number
+
+              message    = lwa_return-message
+
+               ).
+
+              APPEND lwa_return2 TO li_return2[].
+
+            ENDLOOP.
+
+            LOOP AT li_return2 INTO lwa_return2.
+
+              DATA(lo_msg1) = me->/iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+
+              lo_msg1->add_message( iv_msg_type   = /iwbep/cl_cos_logger=>error
+
+                                    iv_msg_id     = lwa_return2-id
+
+                                    iv_msg_number = lwa_return2-number
+
+                                    iv_msg_text = lwa_return2-message
+
+                                  ).
+
+            ENDLOOP.
+
+            RAISE EXCEPTION NEW /iwbep/cx_mgw_busi_exception( message_container = lo_msg1 ). "#EC SCOPE_OF_VAR
+
+          ENDIF.
+
+          READ TABLE li_return TRANSPORTING NO FIELDS WITH KEY type = lc_e.
+
+          IF sy-subrc IS INITIAL.
+
+*        Error handling
+
+            LOOP AT li_return INTO lwa_return.
+
+              lwa_return2 = VALUE #( BASE lwa_return
+
+              type       = lwa_return-type
+
+              number     = lwa_return-number
+
+              message    = lwa_return-message
+
+               ).
+
+              APPEND lwa_return2 TO li_return2[].
+
+            ENDLOOP.
+
+            LOOP AT li_return2 INTO lwa_return2.
+
+              DATA(lo_msg2) = me->/iwbep/if_mgw_conv_srv_runtime~get_message_container( ).
+
+              lo_msg2->add_message( iv_msg_type   = /iwbep/cl_cos_logger=>error
+
+                                    iv_msg_id     = lwa_return2-id
+
+                                    iv_msg_number = lwa_return2-number
+
+                                    iv_msg_text = lwa_return2-message
+
+                                  ).
+
+            ENDLOOP.
+
+            RAISE EXCEPTION NEW /iwbep/cx_mgw_busi_exception( message_container = lo_msg2 ). "#EC SCOPE_OF_VAR
+
+          ELSE.
+
+*in case of Success
+
+            CLEAR lwa_return.
+
+            READ TABLE li_return INTO lwa_return WITH KEY type = lc_s.
+
+            IF sy-subrc IS INITIAL AND lwa_return-ex_bu_partner IS NOT INITIAL.
+
+              lwa_deep_entity-bu_partner = lwa_return-ex_bu_partner.
+
+            ENDIF.
+
+            me->copy_data_to_ref(
+
+               EXPORTING
+
+                 is_data = lwa_deep_entity
+
+               CHANGING
+
+                 cr_data = er_deep_entity ).
+
+          ENDIF.
+
+        ENDIF.
+
+      ENDIF.
+
+    ENDMETHOD.
+
+Custom BAPI includes (customer master BP creation)
+
+data : lv_flg type xfeld.
+
+  data  : lwa_return    type bapiret2.
+
+  data lwa_return2 type zotc_brim_return.
+
+  data: lv_status      type string.
+
+  data  : li_tec_params type t_i_tec_params,
+
+          lv_err_msg    type string,
+
+          lv_extnumber  type balnrext.
+
+  data: lwa_partners type zotc_brim_partners_create.
+
+  data: lwa_sales type zotc_brim_sd_create.    "inb-ns00
+
+  data: li_tax type standard table of zotc_brim_sd_create.    "inb-ns00
+
+  data: li_tax1 type standard table of zotc_brim_sd_create.    "inb-ns00
+
+  data: lv_vkont type vkont_kk.
+
+  data: li_log_no type bal_t_lgnm,
+
+        lv_log_no type string.
+
+  data: lo_log1        type ref to zcl_log_maint.
+
+  data lv_value type rvari_val_255.
+
+  data : ex_bu_partner type  bu_partner,
+
+         ex_cont_acct  type  vkont_kk,
+
+         re_return     type  bapiret2_tt,
+
+         re_return2    type  bapiret2_tt,    "INS: USSHIA16/DS1K926511
+
+         ex_bcn_num    type  bu_bpext,
+
+         ex_suffix     type  char10,
+
+         wa_ret_log    type  zotc_brim_return.
+
+  data: create_ma_parent type c,
+
+        only_ma_child    type c.
+
+  data: c_mabeg     type char08,
+
+        c_assnf     type char08,
+
+        c_valfr_aga type char08.
+
+  data: v_mabeg   type dats,
+
+        v_maend   type dats,
+
+        c_v_mabeg type char08,
+
+        c_v_maend type char08,
+
+        v_name_1  type bu_nameor1,
+
+        v_crdat   type bu_crdat,
+
+        v_vtbeg   type string.
+
+  data: is_header    type fkk_ma_hdr_di,
+
+        is_ma_h_di   type fkk_ma_h_di,
+
+        ev_xerror    type xfeld,
+
+        es_ma_h      type dfkk_ma_h,
+
+        it_ma_bp_di  type table of fkk_ma_bp_di,
+
+        it_ma_ag_di  type table of fkk_ma_ag_di,
+
+        it_ma_agi_di type table of fkk_ma_agi_di,
+
+        it_ma_aga_di type table of fkk_ma_aga_di,
+
+        wa_ma_bp_di  type fkk_ma_bp_di,
+
+        wa_ma_ag_di  type fkk_ma_ag_di,
+
+        wa_ma_agi_di type fkk_ma_agi_di,
+
+        wa_ma_aga_di type fkk_ma_aga_di.
+
+  constants : lc_parttype       type char4 value 'Z002',
+
+              lc_impcode        type char3 value '998',
+
+              lc_payterm_switch type string value 'ZZ_PAYTERM_FETCH_SWITCH',
+
+              lc_cont_func      type char2 value 'Z5',
+
+              lc_cont_func1     type char2 value 'ZI'.
+
+  data : lv_bp   like zbrim_bupa_create-bu_partner,
+
+         lv_fnum type nriv-fromnumber,
+
+         lv_tnum type nriv-tonumber,
+
+         lv_num  type nriv-nrlevel.
+
+  free : tb_return_log[] , re_return[] .
+
+  data(lwa_contract)      = im_ca_create.
+
+  data(lwa_cms)           = im_cms_create .
+
+*<< SOC Company code population
+
+  clear lv_value.
+
+  select single * into @data(lwa_country_ccode) from tvarvc "#EC CI_ALL_FIELDS_NEEDED
+
+    where name = @im_country_code and type = 'S' and
+
+      low = @im_market_place.                           "#EC CI_NOORDER
+
+  if sy-subrc = 0.
+
+    lv_value = lwa_country_ccode-high.
+
+    lwa_contract-comp_code = lv_value.
+
+    lwa_contract-std_comp_code = lv_value.
+
+    lwa_cms-credit_segment = lv_value.
+
+  else.
+
+    clear : wa_ret_log .
+
+    wa_ret_log-ex_bcn_num = ex_bcn_num .
+
+    wa_ret_log-ex_bu_partner = ex_bu_partner .
+
+    wa_ret_log-ex_cont_acct = ex_cont_acct .
+
+    wa_ret_log-ex_suffix = ex_suffix .
+
+    wa_ret_log-message = text-e06 .
+
+    append wa_ret_log to tb_return_log .
+
+    return.
+
+  endif.
+
+*<< EOC Company code population
+
+  data(lwa_bp_create) = im_bp_create.
+
+  if lwa_contract-bcn_num ne lwa_contract-bcn_num .
+
+    clear : lwa_contract.
+
+  endif.
+
+  if lwa_cms-bcn_num ne lwa_bp_create-bcn_num .
+
+    clear : lwa_cms .
+
+  endif.
+
+*  first we need to see if the country we are looking at needs the logic
+
+  select single low
+
+    into @data(lv_country)
+
+    from ztec_params_tab
+
+    where progname = @zcl_ts_constants=>c_prog_bpcreate
+
+      and fieldname = 'Z_COUNTRY'
+
+      and low = @lwa_bp_create-country.
+
+  if sy-subrc = 0.
+
+    if lwa_bp_create-postl_cod1 is not initial.
+
+*      "removes any non numeric values
+
+      replace all occurrences of regex '[^0-9]' in lwa_bp_create-postl_cod1 with ''.
+
+      "fill in leading zeros IF needed -> does nothing if not
+
+      lwa_bp_create-postl_cod1 = |{ lwa_bp_create-postl_cod1 width = 5 pad = '0' align = right }|.
+
+    endif.
+
+  endif.
+
+*--- Start of INS: USSHIA16/DS1K926511
+
+* Change scenario determination logic
+
+* Pass the  BCN_NUMBER that is sent as input to BUT000 table,
+
+* pick the GUID field. Pass this GUID field to CVI_CUST_LINK table,
+
+* if an entry exists - pick the CUSTOMER field => This is the BP number,
+
+* as it exists already: this will be change scenario.
+
+*If no CUSTOMER is found, this will be creation scenario.
+
+  v_action = zcl_business_partner_ops=>c_task.
+
+  select single partner_guid                                "#EC WARNOK
+
+    from but000
+
+    into @data(lv_partner_guid)
+
+    where bpext = @lwa_bp_create-bcn_num.
+
+  if sy-subrc is initial and lv_partner_guid is not initial .
+
+    select single customer
+
+      from cvi_cust_link
+
+      into @data(lv_customer)
+
+      where partner_guid = @lv_partner_guid.
+
+    if sy-subrc is initial and lv_customer is not initial .
+
+      v_action = zcl_business_partner_ops=>c_task1.
+
+      lwa_bp_create-bu_partner = lv_customer.
+
+    endif.
+
+  endif.
+
+* Source determination logic
+
+* IM_COUNTRY_CODE will determine the source
+
+*(the values are SG for ECC and  MX for Impulse)
+
+  clear: lv_src_impulse, lv_src_ecc.
+
+  if im_country_code = lc_sg .
+
+    lv_src_ecc = abap_true.
+
+  elseif im_country_code = lc_mx.
+
+    lv_src_impulse = abap_true.
+
+    lwa_bp_create-partn_grp = lc_ztr1.
+
+*     Only default the values, if create/change of those role is expected
+
+    if im_ccode_create is not initial.
+
+      im_ccode_create-comp_code = lv_value.
+
+    endif.
+
+    if im_sales_create is not initial.
+
+      im_sales_create-sales_org = '6021'.
+
+    endif.
+
+**Begin of insert by INMEHS04 for credit segment to be as 6021 for MX |18.02.2026|DS1K926511
+
+    if im_cms_create is not initial.
+
+      im_cms_create-credit_segment = '6021'.
+
+    endif.
+
+**End of insert by INMEHS04 for credit segment|18.02.2026| DS1K926511
+
+  endif.
+
+  lwa_bp_create-partn_typ = lc_ztsr.
+
+*--- End of INS: USSHIA16/DS1K926511
+
+  if lwa_bp_create-bcn_num is not initial.
+
+    ex_bcn_num = lwa_bp_create-bcn_num.
+
+    if lwa_bp_create-zz_parentbcn is not initial and 1 = 2.
+
+      select single partner                                 "#EC WARNOK
+
+        from but000
+
+        into @data(lv_bupnm)
+
+        where bpext = @lwa_bp_create-zz_parentbcn
+
+             and bu_group = @zcl_ts_constants=>c_ztr1 .
+
+      if sy-subrc = 0.
+
+        select single @abap_true from dfkk_ma_bp
+
+           where gpart = @lv_bupnm into @data(v_exists_bp).
+
+        if v_exists_bp is not initial.
+
+          select single @abap_true from dfkk_ma_h
+
+             where gpart = @lv_bupnm into @data(v_exists_h).
+
+          if v_exists_h is initial.
+
+            message e000(zotc_bp) with text-e09 into lwa_return-message.
+
+            mac_sy_messages lwa_return.
+
+            lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+            append lwa_return to re_return.
+
+            clear lwa_return.
+
+          endif.
+
+        endif.
+
+        select single makey from dfkk_ma_h                  "#EC WARNOK
+
+            where gpart = @lv_bupnm
+
+            into @data(lv_makey).
+
+        if lv_makey is initial.
+
+          if lwa_cms-xblocked = '8'.
+
+            create_ma_parent = 'X'.
+
+          else.
+
+            message e000(zotc_bp) with text-e07 into lwa_return-message.
+
+            mac_sy_messages lwa_return.
+
+            lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+            append lwa_return to re_return.
+
+            clear lwa_return.
+
+          endif.
+
+        else.
+
+          if lwa_cms-xblocked = '8'.
+
+            only_ma_child = 'X'.
+
+            if lwa_bp_create-bu_partner is initial.
+
+              select single partner from but000 into @data(bu_partner) "#EC WARNOK
+
+                  where bpext = @lwa_bp_create-bcn_num
+
+                and bu_group = @zcl_ts_constants=>c_ztr1 .
+
+              if bu_partner is not initial.
+
+                lwa_bp_create-bu_partner = bu_partner.
+
+                clear: bu_partner.
+
+              endif.
+
+            endif.
+
+            select single a~gpart from dfkk_ma_h as a inner join
+
+                                       dfkk_ma_bp as b on b~aguid = a~aguid
+
+              into @data(v_gpart_p) where b~gpart = @lwa_bp_create-bu_partner.
+
+            if v_gpart_p is not initial and ( v_gpart_p ne lv_bupnm ).
+
+              message e016(zotc_bp) with v_gpart_p into lwa_return-message.
+
+              mac_sy_messages lwa_return.
+
+              lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+              append lwa_return to re_return.
+
+              clear lwa_return.
+
+            endif.
+
+          else.
+
+            message e000(zotc_bp) with text-e07 into lwa_return-message.
+
+            mac_sy_messages lwa_return.
+
+            lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+            append lwa_return to re_return.
+
+            clear lwa_return.
+
+          endif.
+
+        endif.
+
+      else.
+
+        message e000(zotc_bp) with text-e05 into lwa_return-message.
+
+        mac_sy_messages lwa_return.
+
+        lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+        append lwa_return to re_return.
+
+        clear lwa_return.
+
+      endif.
+
+    elseif lwa_bp_create-zz_parentbcn is initial and
+
+           lwa_cms-xblocked = '8'.
+
+      message e000(zotc_bp) with text-e08 into lwa_return-message.
+
+      mac_sy_messages lwa_return.
+
+      lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+      append lwa_return to re_return.
+
+      clear lwa_return.
+
+    endif.
+
+    v_bcn = lwa_bp_create-bcn_num.
+
+    v_suffix = lwa_bp_create-zz_suffix.
+
+    ex_suffix = lwa_bp_create-zz_suffix.
+
+*--- Start of INS: USSHIA16/DS1K926511
+
+    clear sy-subrc.
+
+    if lwa_bp_create-partn_grp = lc_zinc.
+
+      select single partner bpext                           "#EC WARNOK
+
+              from but000
+
+              into ( v_bup , v_bcn )
+
+              where bpext  = v_bcn
+
+              and bu_group = lc_zinc .
+
+    else.
+
+*--- End of INS: USSHIA16/DS1K926511
+
+      select single partner bpext                           "#EC WARNOK
+
+        from but000
+
+        into ( v_bup , v_bcn )
+
+        where bpext  = v_bcn
+
+        and bu_group = zcl_ts_constants=>c_ztr1 .
+
+    endif.        "INS: USSHIA16/DS1K926511
+
+    if sy-subrc eq 0 .
+
+      v_action =  zcl_ts_constants=>c_update .
+
+      select single addrnumber                              "#EC WARNOK
+
+        from but020
+
+        into v_adrnr
+
+        where partner = v_bup
+
+        and   adext   = v_suffix.
+
+      if sy-subrc ne 0.
+
+        clear : v_adrnr.
+
+      endif.
+
+    else.
+
+      v_action = zcl_ts_constants=>c_char_i.
+
+    endif.
+
+  else .
+
+    message e000(zotc_bp) with text-e04 into lwa_return-message.
+
+    mac_sy_messages lwa_return.
+
+    lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+
+    append lwa_return to re_return.
+
+    clear lwa_return.
+
+  endif.
+
+  if re_return is  initial.
+
+    clear : v_ecc_flag,
+
+            lv_imp_payterm_ca, lv_payterm_flag.
+
+    select single erp,                                      "#EC WARNOK
+
+                  imp_payterm_ca
+
+    from zfi_lcl_entities
+
+    into (@data(lv_erp), @lv_imp_payterm_ca)
+
+          where company_code =  @lwa_country_ccode-high .
+
+    select single low from tvarvc into @lv_payterm_flag     "#EC WARNOK
+
+          where name = @lc_payterm_switch.
+
+    select *
+
+      from ztec_params_tab
+
+      into table li_tec_params
+
+     where progname = zcl_ts_constants=>c_prog_bpcreate .
+
+    if sy-subrc = 0.
+
+      i_params[] = li_tec_params[] .
+
+      loop at li_tec_params into data(lwa_params).
+
+        if lwa_params-fieldname = zcl_ts_constants=>c_ca_payterms .
+
+          if lv_payterm_flag = abap_true.
+
+            if lv_imp_payterm_ca = abap_true.
+
+              "" Do nothing
+
+            else.
+
+              lwa_contract-payterms = lwa_params-high.
+
+              lv_payterms = lwa_params-high.   "INS: USSHIA16/DS1K926511
+
+            endif.
+
+          else.
+
+            "" Existing logic should work
+
+            lwa_contract-payterms = lwa_params-high.
+
+            lv_payterms = lwa_params-high.     "INS: USSHIA16/DS1K926511
+
+          endif.
+
+        elseif lwa_params-fieldname = zcl_ts_constants=>c_ca_acct_relat .
+
+          lwa_contract-acct_relat = lwa_params-high .
+
+        elseif lwa_params-fieldname = zcl_ts_constants=>c_ca_toler_group .
+
+          lwa_contract-toler_group = lwa_params-high .
+
+        elseif lwa_params-fieldname = zcl_ts_constants=>c_ca_acct_det_id .
+
+          lwa_contract-acct_determ_id = lwa_params-high .
+
+        endif.
+
+      endloop.
+
+    else.
+
+      free li_tec_params.
+
+    endif.
+
+*    " Changing values in SAP format
+
+    if lwa_cms-rating_val_date is not initial  .
+
+      concatenate lwa_cms-rating_val_date+6(4)  lwa_cms-rating_val_date+3(2)  lwa_cms-rating_val_date+0(2)
+
+        into v_rating_val_date in character mode .
+
+    endif.
+
+    if lwa_cms-rating_chg_date is not initial  .
+
+      concatenate lwa_cms-rating_chg_date+6(4)  lwa_cms-rating_chg_date+3(2)  lwa_cms-rating_chg_date+0(2)
+
+        into v_rating_chg_date in character mode .
+
+    endif.
+
+    if lwa_cms-risk_class_chgdt is not initial  .
+
+      concatenate lwa_cms-risk_class_chgdt+6(4)  lwa_cms-risk_class_chgdt+3(2)  lwa_cms-risk_class_chgdt+0(2)
+
+        into v_risk_class_chgdt in character mode .
+
+    endif.
+
+    if lwa_cms-credit_limit is not initial  .
+
+      try .
+
+          v_credit_limit = lwa_cms-credit_limit  .
+
+        catch cx_root.
+
+          clear :     v_credit_limit .
+
+      endtry.
+
+    endif.
+
+    if lv_payterm_flag = abap_true.
+
+      if lv_imp_payterm_ca = abap_true.
+
+        data(lwa_contract1) = lwa_contract.
+
+        if sy-subrc = 0.
+
+          if lwa_contract1-impulsecode is initial and v_action = zcl_ts_constants=>c_char_i.
+
+            if lwa_bp_create-partn_typ = lc_parttype.
+
+              lwa_contract-impulsecode = lc_impcode.
+
+            else.
+
+              clear : wa_ret_log .
+
+              wa_ret_log-message = text-e13 .
+
+              append wa_ret_log to tb_return_log .
+
+*              exit .
+
+              return.
+
+            endif.
+
+          endif.
+
+          if lwa_contract-impulsecode is not initial.
+
+            select impulse_code, bukrs, sap_paymt_terms
+
+                   from zfica_paymt_trms
+
+                   where impulse_code = @lwa_contract-impulsecode
+
+                    and  bukrs = @lv_value
+
+                   into corresponding fields of table @li_paymt_trms.
+
+            if sy-subrc ne 0 and v_action = zcl_ts_constants=>c_char_i.
+
+              clear : wa_ret_log .
+
+              wa_ret_log-message = text-e14 .
+
+              append wa_ret_log to tb_return_log .
+
+*  Begin of insert by INMEHS04 to pick sap payment terms in case of impulse
+
+* End of change by INMEHS04
+
+*              exit .
+
+              return.
+
+            endif.
+
+          endif.
+
+        endif.
+
+      endif.
+
+    endif.
+
+    if v_action = 'U' .
+
+      call function 'CONVERSION_EXIT_ALPHA_INPUT'
+
+        exporting
+
+          input  = v_bup
+
+        importing
+
+          output = im_bp_create-bu_partner.
+
+*--- Start of INS: USSHIA16/DS1K926511
+
+*      " Modify Business Partner / Contract Account / Credit Management / Collection Profile
+
+      call function 'ZOTC_CUST_BP_CHANGE'
+
+        exporting
+
+          im_bp_change       = im_bp_create
+
+          im_ca_change       = im_ca_create
+
+          im_cms_change      = im_cms_create
+
+          im_sales_change    = im_sales_create
+
+          im_ccode_change    = im_ccode_create
+
+          im_country_code    = im_country_code
+
+        tables
+
+          tb_partners_change = tb_partners_create[]
+
+          tb_contact_change  = tb_contact_create[]
+
+          tb_return_log      = tb_return_log[].
+
+*--- End of INS: USSHIA16/DS1K926511
+
+      ex_bu_partner = lwa_bp_create-bu_partner.
+
+      ex_cont_acct = lv_vkont.
+
+    elseif v_action = 'I'  .
+
+      lwa_bp_create-bcn_num = to_upper( lwa_bp_create-bcn_num ).
+
+* Action I is required for Creation of Busines Partner
+
+      if v_action = zcl_ts_constants=>c_char_i.
+
+* Check if Business Partner already exists with same BCN_NO (BPEXT)
+
+        perform f_bp_cre_check_dupl      using lwa_bp_create
+
+                                         changing re_return[] .
+
+        if re_return[] is initial.
+
+          if lv_erp = 'ECC_SAP' .
+
+            if lwa_bp_create-bcn_num is not initial .
+
+*--- Start of INS: USSHIA16/DS1K926511
+
+              if lwa_bp_create-partn_grp = lc_zinc.
+
+                select single fromnumber tonumber
+
+                              from nriv
+
+                              into (lv_fnum , lv_tnum )
+
+                              where object = 'BU_PARTNER'
+
+                              and subobject = space
+
+                              and nrrangenr = 'IC'
+
+                              and toyear = '000' .
+
+              else.
+
+*--- End of INS: USSHIA16/DS1K926511
+
+                select single fromnumber tonumber
+
+                  from nriv
+
+                  into (lv_fnum , lv_tnum )
+
+                  where object = 'BU_PARTNER'
+
+                  and subobject = space
+
+                  and nrrangenr = 'Z1'
+
+                  and toyear = '000' .
+
+              endif.
+          if sy-subrc = 0.
+                call function 'CONVERSION_EXIT_ALPHA_INPUT'
+                  exporting
+                    input  = lwa_bp_create-bcn_num
+                  importing
+                    output = lv_bp.
+                if lv_fnum <= lv_bp and lv_tnum >= lv_bp.
+                  v_ecc_flag = abap_true .
+                  export lv_bp to memory id 'ZBP_CUST_NR' .
+                  " Import is written in Enhancement 1 : ZENH_BADI_BP_CUSTOM_NUM_RANGE
+                  " Import is written in Enhancement 2 : ZENH_BP_CUSTOM_NUM_RANGE
+                else.
+                  wa_ret_log-ex_bcn_num = lv_bp .
+                  wa_ret_log-message = text-e12 .
+                  append wa_ret_log to tb_return_log .
+                endif.
+              endif.
+            else.
+              wa_ret_log-ex_bcn_num = lwa_bp_create-bcn_num .
+              wa_ret_log-message = text-e11 .
+              append wa_ret_log to tb_return_log .
+            endif.
+          endif.
+          clear : lv_bp , lv_erp , lv_fnum , lv_tnum .
+          perform f_bp_cre_gen_details      using lwa_bp_create
+                                                  abap_true   "Commit Work
+                                         changing ex_bu_partner
+                                                  re_return[] .
+        else.
+          return.
+        endif.
+      else.
+        message e000(zotc_bp) with text-b01 into lwa_return-message.
+        mac_sy_messages lwa_return.
+        lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+        append lwa_return to re_return.
+        clear lwa_return.
+      endif.
+*--- Start of INS: USSHIA16/DS1K926511
+      if im_sales_create is not initial and lv_sales_role is not initial. "AND tb_partners_create[] IS NOT INITIAL "INMEHS04 for impulse
+*        For Impulse, hardcoding values
+        if lv_src_impulse is not initial and ex_bu_partner is not initial.
+          lwa_partners-partner_func = 'AG'.
+          lwa_partners-partner_num = ex_bu_partner.
+          append lwa_partners to tb_partners_create.
+          lwa_partners-partner_func = 'WE'.
+          lwa_partners-partner_num = ex_bu_partner.
+          append lwa_partners to tb_partners_create.
+          lwa_partners-partner_func = 'RE'.
+          lwa_partners-partner_num = ex_bu_partner.
+          append lwa_partners to tb_partners_create.
+          lwa_partners-partner_func = 'RG'.
+          lwa_partners-partner_num = ex_bu_partner.
+          append lwa_partners to tb_partners_create.
+*INB-NS00 START
+*          im_sales_create-depart_country = 'MX'.
+*          im_sales_create-tax_cat = 'ZTXJ'.
+*          im_sales_create-tax_class = '1'.
+*      INB-NS00 END
+          im_sales_create = value #( base im_sales_create dist_channel = zcl_business_partner_ops=>c_dist_channel
+          division = zcl_business_partner_ops=>c_division
+          cust_stat_grp = zcl_business_partner_ops=>c_cust_stat_grp
+          pricing_proc = zcl_business_partner_ops=>c_pricing_proc
+          acct_assign_grp = zcl_business_partner_ops=>c_acct_assign_grp
+          depart_country = zcl_business_partner_ops=>c_depart_country  "INB-NS00
+          tax_class = zcl_business_partner_ops=>c_tax_class            "INMEHS04 ZTXJ for MX
+          tax_cat = zcl_business_partner_ops=>c_tax_cat                "INMEHS04 20.02.2026 not required for impulse
+          credit_ctrl_area = zcl_business_partner_ops=>c_ctrl_area     "INMEHS04 19.02.2026
+           ).
+**Begin of insert by INMEHS04 18.02.2026 for taking Sap payment terms for sales view
+*        LOOP at li_paymt_trms INTO DATA(lwa_paymt_trms) WHERE impulse_code = '990' OR impulse_code = '995'.
+          if im_sales_create-payterms = '990' or im_sales_create-payterms = '995'.
+            read table li_paymt_trms into data(lwa_paymt) with key impulse_code = '300' .
+            if sy-subrc eq 0.
+*          lwa_paymt_trms-impulse_code = '300'.
+              im_sales_create-payterms = lwa_paymt-sap_paymt_terms.
+            endif.
+          endif.
+*        ENDLOOP.
+**End of insert by INMEHS04 18.02.2026.
+        endif.
+      endif . "INMEHS04
+*       For ECC, KNA1 enhancement needs the BP number to be used for external number assignment
+**Checking sales and partners condition both for ecc
+      if im_sales_create is not initial and tb_partners_create[] is not initial and lv_sales_role is not initial. "INMEHS04
+        if lv_src_ecc is not initial and ex_bu_partner is not initial.
+          lv_bp = ex_bu_partner .
+          export lv_bp to memory id 'ZBP_KNA1_NR' .          " Import is written in Enhancement 1 : ZENH_KNA1_CUSTOM_NUM_RANGE
+        endif.
+        clear re_return2[].
+        data(lo_obj) = new zcl_business_partner_ops( ).
+*       Calling the Creation for Sales role
+        lo_obj->create_sales_role(
+         exporting
+           im_bu_partner       = ex_bu_partner
+           im_sales_create     = im_sales_create
+           im_i_partner_create = tb_partners_create[]
+           im_ecc_flag         = v_ecc_flag
+         receiving
+              re_return           = re_return2[]
+           ).
+        append lines of re_return2[] to re_return[].
+*        Free the memory ID exported for ECC
+        if lv_src_ecc is not initial and ex_bu_partner is not initial.
+          free memory id 'ZBP_KNA1_NR' .
+        endif.
+      endif.
+      if im_ccode_create is not initial and lv_company_role is not initial.
+*        im_ccode_create-payterms = lv_payterms.  "INMEHS04 for payterms
+*        For Impulse, hardcoding values
+        if lv_src_impulse is not initial.
+          im_ccode_create-payhist_ind = abap_true.
+          im_ccode_create-recon_acct = zcl_business_partner_ops=>c_recon_acc .
+          im_ccode_create-sort_key = zcl_business_partner_ops=>c_sort_key .
+**Begin of insert by INMEHS04 18.02.2026 for taking Sap payment terms for sales view
+*        LOOP AT li_paymt_trms INTO DATA(lwa_paymt_trms1) WHERE impulse_code = '990' OR impulse_code = '995'.
+          if im_ccode_create-payterms = '990' or im_ccode_create-payterms = '995'.
+            read table li_paymt_trms into data(lwa_paymt1) with key impulse_code = '300'.
+            if sy-subrc eq 0.
+              im_ccode_create-payterms = lwa_paymt1-sap_paymt_terms.
+            endif.
+          endif.
+*        ENDLOOP.
+**End of insert by INMEHS04 18.02.2026.
+        endif.
+*       For ECC, KNA1 enhancement needs the BP number to be used for external number assignment
+        if lv_src_ecc is not initial and ex_bu_partner is not initial.
+          lv_bp = ex_bu_partner .
+          export lv_bp to memory id 'ZBP_KNA1_NR' .
+          " Import is written in Enhancement 1 : ZENH_KNA1_CUSTOM_NUM_RANGE
+        endif.
+        clear re_return2[].
+        data(lo_obj2) = new zcl_business_partner_ops( ).
+*       Calling the Creation for Company role
+        lo_obj2->create_company_role(
+         exporting
+           im_bu_partner     = ex_bu_partner
+           im_company_create = im_ccode_create
+           im_ecc_flag       = v_ecc_flag
+         receiving
+                      re_return           = re_return2[]
+           ).
+        append lines of re_return2[] to re_return[].
+*        Free the memory ID exported for ECC
+        if lv_src_ecc is not initial and ex_bu_partner is not initial.
+          free memory id 'ZBP_KNA1_NR' .
+        endif.
+      endif.
+      if tb_contact_create[] is not initial and lv_contact_role is not initial.
+        if lv_src_impulse is initial.
+*       For ECC, KNA1 enhancement needs the BP number to be used for external number assignment
+          if lv_src_ecc is not initial and ex_bu_partner is not initial.
+*Begin of insert condition for ECC ZI or Z5 to create contact |INMEHS04 | 19.02.2026
+            if tb_contact_create-contact_func = lc_cont_func or tb_contact_create-contact_func = lc_cont_func1. "INMEHS04
+*END
+              lv_bp = ex_bu_partner .
+              export lv_bp to memory id 'ZBP_KNA1_NR' .
+              " Import is written in Enhancement 1 : ZENH_KNA1_CUSTOM_NUM_RANGE
+            endif. "INMEHS04
+          endif.
+          clear re_return2[].
+          data(lo_obj3) = new zcl_business_partner_ops( ).
+*       Calling the Creation for Contact person role and relationship
+          lo_obj3->create_contact_role(
+           exporting
+             im_bu_partner       = ex_bu_partner
+             im_bp_create        = im_bp_create
+             im_i_contact_create = tb_contact_create[]
+             im_ecc_flag         = v_ecc_flag
+           receiving
+             re_return           = re_return2[]
+             ).
+          append lines of re_return2[] to re_return[].
+*        Free the memory ID exported for ECC
+          if lv_src_ecc is not initial and ex_bu_partner is not initial.
+            free memory id 'ZBP_KNA1_NR' .
+          endif.
+*       For Impulse=> We need to use impulse contact person create method
+        else.
+          clear re_return2[].
+          lo_obj3 = new zcl_business_partner_ops( ).
+*       Calling the Creation for Contact person role and relationship
+          lo_obj3->create_imp_contact_role(
+           exporting
+             im_bu_partner       = ex_bu_partner
+             im_bp_create        = im_bp_create
+             im_i_contact_create = tb_contact_create[]
+           receiving
+             re_return           = re_return2[]
+             ).
+          append lines of re_return2[] to re_return[].
+        endif.
+      endif.
+*--- End of INS: USSHIA16/DS1K926511
+*** Begin of insert for impulse contact person creation INMEHS04 19.02.2026
+*        IF lv_src_impulse IS NOT INITIAL AND ex_bu_partner IS NOT INITIAL.
+*          lv_bp = ex_bu_partner .
+**        EXPORT lv_bp TO MEMORY ID 'ZBP_KNA1_NR' .
+*          " Import is written in Enhancement 1 : ZENH_KNA1_CUSTOM_NUM_RANGE
+*        ENDIF. "INMEHS04
+*        CLEAR re_return2[].
+*        DATA(lo_obj4) = NEW zcl_business_partner_ops( ).
+**       Calling the Creation for Contact person role and relationship
+*        lo_obj4->create_contact_role(
+*         EXPORTING
+*           im_bu_partner       = ex_bu_partner
+*           im_bp_create        = im_bp_create
+*           im_i_contact_create = tb_contact_create[]
+**           im_ecc_flag         = v_ecc_flag
+*         RECEIVING
+*           re_return           = re_return2[]
+*           ).
+*
+*        APPEND LINES OF re_return2[] TO re_return[].
+**        Free the memory ID exported for ECC
+**      IF lv_src_impulse IS NOT INITIAL AND ex_bu_partner IS NOT INITIAL.
+**        FREE MEMORY ID 'ZBP_KNA1_NR' .
+**      ENDIF.
+*      ENDIF.
+*    ENDIF.
+**END of contact person for impulse INMEHS04 19.02.2026
+* Once Business Partner is created, proceed further with Creating
+* respective views with requested data
+      if ex_bu_partner is not initial.
+* Contract Account Creation
+        if lwa_contract is not initial.
+*          if v_action = zcl_ts_constants=>c_char_i and lv_contract_role is not initial.                                "DEL: APU001/DS1K926511 - 13/03/2026
+          if v_action = zcl_ts_constants=>c_char_i and lv_contract_role is not initial and lwa_contract is not initial. "INS: APU001/DS1K926511 - 13/03/2026
+            perform f_bp_cre_ctracct_details    using ex_bu_partner
+                                                      lwa_bp_create
+                                                      lwa_contract
+                                                      lwa_cms
+                                                      li_tec_params
+                                                      abap_true     "Commit Work
+                                             changing ex_cont_acct
+                                                      re_return[].
+*     Begin of INS: APU001/DS1K926511 - 13/03/2026
+          elseif v_action = zcl_ts_constants=>c_char_i and lv_contract_role is not initial and lwa_contract is initial .
+            message e000(zotc_bp) with text-e15 into lwa_return-message.
+            mac_sy_messages lwa_return.
+            lwa_return-parameter = zcl_ts_constants=>c_para_cms.
+            append lwa_return to re_return.
+            clear lwa_return.
+*  End of INS: APU001/DS1K926511 - 13/03/2026
+          else.
+            if lv_contract_role is not initial.
+              message e000(zotc_bp) with text-b04 into lwa_return-message.
+              mac_sy_messages lwa_return.
+              lwa_return-parameter = zcl_ts_constants=>c_para_ctra.
+              append lwa_return to re_return.
+              clear lwa_return.
+            endif.
+          endif.
+        endif.
+      endif.
+* Business Partner Identification Data-CR32
+      perform f_bp_cre_identif_details   using ex_bu_partner
+                                               lwa_bp_create
+                                      changing re_return[].
+* Credit Management Detail in the Business Partner View
+*      IF v_action = zcl_ts_constants=>c_char_i AND lv_cms_role IS NOT INITIAL.                            "DEL: APU001/DS1K926511 - 13/03/2026
+      if v_action = zcl_ts_constants=>c_char_i and lv_cms_role is not initial and lwa_cms is not initial . "INS: APU001/DS1K926511 - 13/03/2026
+        perform f_bp_cre_credit_details       using ex_bu_partner
+                                                    lwa_contract-payterms
+                                                    lwa_contract-comp_code
+                                                    lwa_bp_create
+                                                    lwa_cms
+                                                    li_tec_params
+                                           changing re_return[].
+*     Begin of INS: APU001/DS1K926511 - 13/03/2026
+      elseif v_action = zcl_ts_constants=>c_char_i and lv_cms_role is not initial and lwa_cms is initial .
+        message e000(zotc_bp) with text-e16 into lwa_return-message.
+        mac_sy_messages lwa_return.
+        lwa_return-parameter = zcl_ts_constants=>c_para_cms.
+        append lwa_return to re_return.
+        clear lwa_return.
+*  End of INS: APU001/DS1K926511 - 13/03/2026
+      else.
+        if lv_cms_role is not initial.
+          message e000(zotc_bp) with text-b02 into lwa_return-message.
+          mac_sy_messages lwa_return.
+          lwa_return-parameter = zcl_ts_constants=>c_para_cms.
+          append lwa_return to re_return.
+          clear lwa_return.
+        endif.
+      endif.
+      if create_ma_parent = 'X'.
+        is_header-aktyp = '01'.
+        c_mabeg = sy-datum.
+        is_ma_h_di-gpart = lv_bupnm.
+        is_ma_h_di-mabeg = c_mabeg.
+        is_ma_h_di-maend = '99991231'.
+        is_ma_h_di-tzone = sy-zonlo.
+        is_ma_h_di-dfspr = sy-langu.
+        select single name_org1,crdat from but000 into (@v_name_1 ,@v_crdat)
+           where partner = @lv_bupnm.
+        is_ma_h_di-mabez = v_name_1.
+        select vtkey,gpart,vtbeg from dfkk_vt_h
+            into table @data(lt_vt_h)
+           where gpart = @lv_bupnm.
+        if sy-subrc eq 0.
+          sort lt_vt_h by vtbeg ascending.
+          read table lt_vt_h into data(ls_vt_h) index 1.
+          if sy-subrc = 0.
+            v_vtbeg          = ls_vt_h-vtbeg.
+            is_ma_h_di-mabeg = v_vtbeg+0(8)."Oldest Master Agreements Valid from date
+          endif.
+        else.
+          is_ma_h_di-mabeg = v_crdat."Creation date of BP
+        endif.
+        clear :v_vtbeg,v_crdat,lt_vt_h.
+
+        wa_ma_bp_di-bp_chind = 'I'.
+        wa_ma_bp_di-gpart_bp = lv_bupnm.
+        append wa_ma_bp_di to it_ma_bp_di.
+        "Child
+        wa_ma_bp_di-bp_chind = 'I'.
+        if lwa_bp_create-bu_partner is not initial.
+          wa_ma_bp_di-gpart_bp = lwa_bp_create-bu_partner.
+          append wa_ma_bp_di to it_ma_bp_di.
+        else.
+          select single partner from but000                 "#EC WARNOK
+            into @data(lv_child_bp_1)
+            where bpext = @lwa_bp_create-bcn_num
+               and bu_group = @zcl_ts_constants=>c_ztr1 .
+          if sy-subrc = 0.
+            wa_ma_bp_di-gpart_bp = lv_child_bp_1.
+            append wa_ma_bp_di to it_ma_bp_di.
+          endif.
+        endif.
+
+        c_assnf = sy-datum.
+        wa_ma_ag_di-ag_chind = 'I'.
+        wa_ma_ag_di-agrmt = lv_bupnm.
+        wa_ma_ag_di-agrty = 'I'.
+        wa_ma_ag_di-assnf = c_assnf.
+        wa_ma_ag_di-assnt = '99991231'.
+        append wa_ma_ag_di to it_ma_ag_di.
+        wa_ma_agi_di-agi_chind = 'I'.
+        wa_ma_agi_di-agrmt_agi = lv_bupnm.
+        wa_ma_agi_di-valto_agi = '99991231'.
+        wa_ma_agi_di-invgp = lv_bupnm.
+*APU_TBC
+        if lwa_contract-cont_acct is not initial.
+          wa_ma_agi_di-invvk = lwa_contract-cont_acct.
+        else.
+          select single vkont from fkkvkp                   "#EC WARNOK
+             where gpart = @lv_bupnm
+            into @data(lv_ca).
+          if lv_ca is not initial.
+            wa_ma_agi_di-invvk = lv_ca.
+          endif.
+        endif.
+*APU_TBC
+        wa_ma_agi_di-abwrh_agi = lv_bupnm.
+        append wa_ma_agi_di to it_ma_agi_di.
+        c_valfr_aga = sy-datum.
+        wa_ma_aga_di-aga_chind = 'I'.
+        wa_ma_aga_di-agrmt_aga = lv_bupnm.
+        wa_ma_aga_di-assty = '1'.
+        if lwa_bp_create-bu_partner is not initial.
+          wa_ma_aga_di-assky = lwa_bp_create-bu_partner.
+        else.
+          wa_ma_aga_di-assky = lv_child_bp_1.
+        endif.
+        wa_ma_aga_di-valfr_aga = c_valfr_aga.
+        wa_ma_aga_di-valto_aga = '99991231'.
+        append wa_ma_aga_di to it_ma_aga_di.
+      elseif only_ma_child = 'X'.
+        is_header-aktyp = '02'.
+        is_header-makey = lv_makey.
+        is_ma_h_di-gpart = lv_bupnm.
+        select single mabeg, maend from dfkk_ma_h
+          into (@v_mabeg, @v_maend) where makey = @lv_makey.
+        c_v_mabeg = v_mabeg.
+        c_v_maend = v_maend.
+        is_ma_h_di-mabeg = c_v_mabeg.
+        is_ma_h_di-maend = c_v_maend.
+        is_ma_h_di-tzone = sy-zonlo.
+        is_ma_h_di-dfspr = sy-langu.
+        select single name_org1 from but000 into @data(v_name)
+            where partner = @lv_bupnm.
+        is_ma_h_di-mabez = v_name.
+        wa_ma_bp_di-bp_chind = 'I'.
+        if lwa_bp_create-bu_partner is not initial.
+          wa_ma_bp_di-gpart_bp = lwa_bp_create-bu_partner.
+          append wa_ma_bp_di to it_ma_bp_di.
+        else.
+          select single partner from but000                 "#EC WARNOK
+            into @data(lv_child_bp_2)
+            where bpext = @lwa_bp_create-bcn_num
+                 and bu_group = @zcl_ts_constants=>c_ztr1 .
+          if sy-subrc = 0.
+            wa_ma_bp_di-gpart_bp = lv_child_bp_2.
+            append wa_ma_bp_di to it_ma_bp_di.
+          endif.
+        endif.
+        c_valfr_aga = sy-datum.
+        wa_ma_aga_di-aga_chind = 'I'.
+        wa_ma_aga_di-agrmt_aga = lv_bupnm.
+        wa_ma_aga_di-assty = '1'.
+        if lwa_bp_create-bu_partner is not initial.
+          wa_ma_aga_di-assky = lwa_bp_create-bu_partner.
+        else.
+          wa_ma_aga_di-assky =  lv_child_bp_2.
+        endif.
+        wa_ma_aga_di-valfr_aga = c_valfr_aga.
+        wa_ma_aga_di-valto_aga = '99991231'.
+        append wa_ma_aga_di to it_ma_aga_di.
+      endif.
+      if is_header is not initial.
+        call function 'VKK_CAMA_MAINTAIN_DI'
+          exporting
+            is_header      = is_header
+            is_ma_h_di     = is_ma_h_di
+            iv_nodata      = '/'
+            ix_commit      = 'X'
+            ix_chdoc       = 'X'
+            ix_keep_memory = 'X'
+          importing
+            ev_xerror      = ev_xerror
+            es_ma_h        = es_ma_h
+          tables
+            it_ma_bp_di    = it_ma_bp_di
+            it_ma_ag_di    = it_ma_ag_di
+            it_ma_agi_di   = it_ma_agi_di
+            it_ma_aga_di   = it_ma_aga_di.
+        if is_header-aktyp = '01' and ev_xerror is initial.
+          message s013(zotc_bp) with es_ma_h-makey into lwa_return-message.
+          mac_sy_messages lwa_return.
+          lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+          append lwa_return to re_return.
+          clear lwa_return.
+          message s014(zotc_bp) with wa_ma_aga_di-assky es_ma_h-makey into lwa_return-message.
+          mac_sy_messages lwa_return.
+          lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+          append lwa_return to re_return.
+          clear lwa_return.
+        elseif is_header-aktyp = '02' and ev_xerror is initial.
+          message s014(zotc_bp) with wa_ma_aga_di-assky lv_makey into lwa_return-message.
+          mac_sy_messages lwa_return.
+          lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+          append lwa_return to re_return.
+          clear lwa_return.
+        elseif ev_xerror is not initial.
+          message i015(zotc_bp) into lwa_return-message.
+          mac_sy_messages lwa_return.
+          lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+          append lwa_return to re_return.
+          clear lwa_return.
+        endif.
+      endif.
+      clear: create_ma_parent, only_ma_child, c_mabeg, c_assnf, c_valfr_aga,
+             wa_ma_bp_di, wa_ma_ag_di, wa_ma_agi_di, wa_ma_aga_di, is_header,
+             is_ma_h_di, it_ma_bp_di[], it_ma_ag_di[], it_ma_agi_di[], it_ma_aga_di[],
+             lv_bupnm, lv_makey, lv_child_bp_1, lv_child_bp_2,
+*             lv_ca,
+             c_v_mabeg, c_v_maend,
+             v_mabeg, v_maend, v_name, v_name_1, v_exists_bp, v_exists_h.
+    else .
+      message e000(zotc_bp) with text-b05 into lwa_return-message.
+      mac_sy_messages lwa_return.
+      lwa_return-parameter = zcl_ts_constants=>c_para_bupa.
+      append lwa_return to re_return.
+      clear lwa_return.
+    endif.
+  endif.  ""
+  if re_return is  not initial.
+    read table re_return into lwa_return with key type = 'E'.
+    if sy-subrc eq 0.
+      clear: lv_extnumber.
+      concatenate ex_bcn_num ex_suffix into lv_extnumber separated by '-'.
+      select object, subobject, extnumber, lognumber from balhdr into table @data(li_balhdr1)
+              where object = @zcl_sw_constants=>c_log_obj
+                and subobject = @zcl_sw_constants=>c_log_sub_obj
+                and extnumber = @lv_extnumber.
+      if sy-subrc is initial and li_balhdr1[] is not initial.
+        data(lv_operation)                    = zcl_sw_constants=>c_create.
+      else.
+        lv_status      = zcl_sw_constants=>c_fail.
+      endif.
+      if  lv_status eq zcl_sw_constants=>c_fail.
+        lo_log1 = new zcl_log_maint( ).
+        check lo_log1 is bound.
+        clear: lv_extnumber.
+        concatenate ex_bcn_num ex_suffix into lv_extnumber separated by '-'.
+        lv_err_msg = lwa_return-message.
+        lo_log1->create_log(
+          exporting
+            im_extnumber =  lv_extnumber               " Object Number
+            im_msg       =  lv_err_msg              " Error Message
+        importing
+          ex_log_no      =  li_log_no                " Application Log: Newly-Assigned LOGNUMBER Table
+        ).
+      else.
+        loop at li_balhdr1 reference into data(lr_balhdr1).
+          clear: lv_extnumber.
+          concatenate ex_bcn_num ex_suffix into lv_extnumber separated by '-'.
+          lv_log_no = lr_balhdr1->lognumber.
+          if not lo_log1 is bound.
+            lo_log1 = new zcl_log_maint( ).
+          endif.
+          lo_log1->delete_log(
+                  exporting
+                    im_log_no    =   lv_log_no                  " Log Number
+                    im_extnumber =   lv_extnumber               " Object Number
+                ).
+          clear: lv_extnumber, lv_log_no.
+        endloop.
+      endif.
+    endif.
+  endif.
+  loop at re_return into lwa_return .
+    clear wa_ret_log.                                          "INS: USSHIA16/DS1K926511
+    wa_ret_log-ex_bcn_num = ex_bcn_num .
+    wa_ret_log-ex_bu_partner = ex_bu_partner .
+    wa_ret_log-ex_cont_acct = ex_cont_acct .
+    wa_ret_log-ex_suffix = ex_suffix .
+    wa_ret_log-message = lwa_return-message .
+    wa_ret_log-type    = lwa_return-type .
+    append wa_ret_log to tb_return_log .
+  endloop.
+  clear : wa_ret_log , re_return[] , lwa_return.
+endfunction.
